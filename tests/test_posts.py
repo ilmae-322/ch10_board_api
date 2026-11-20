@@ -151,3 +151,10 @@ async def test_deleting_post_removes_its_comments_and_likes(client, alice, bob, 
 
     deleted_comment = await client.delete(f"/comments/{comment.json()['id']}", headers=bob)
     assert deleted_comment.status_code == 404
+
+
+async def test_root_redirects_to_swagger_docs(client):
+    response = await client.get("/")
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/docs"
