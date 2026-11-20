@@ -21,6 +21,20 @@ JWT 인증·인가가 적용된 RESTful 게시판 API입니다. PostgreSQL과 SQ
 5. `POST /posts/{post_id}/comments`로 댓글, `PUT /posts/{post_id}/like`로 좋아요
 6. 다른 계정으로 Authorize한 뒤 위 게시글을 수정하면 `403`이 반환됩니다.
 
+## 평가 항목별 구현 요약
+
+각 항목의 자세한 설명은 아래 [구현 내용](#구현-내용)에 있습니다. "검증" 열은 그 동작을 확인하는 테스트입니다.
+
+| 평가 항목 | 구현 | 코드 | 검증 |
+|---|---|---|---|
+| **RESTful API 엔드포인트** | 자원(명사) 중심 URL과 HTTP 메서드 구분, `PATCH` 부분 수정, `201`/`204` 상태 코드, 멱등한 `PUT`/`DELETE` 좋아요, 쿼리 매개변수로 페이지네이션·검색, OpenAPI(Swagger) 문서에 태그·요약·엔드포인트별 오류 응답 명시 | [routers/](app/routers/) | [test_posts.py](tests/test_posts.py), Swagger `/docs` |
+| **Pydantic 검증·직렬화** | 요청·응답 스키마 분리(비밀번호 해시 미노출), 커스텀 검증(비밀번호 영문+숫자·72바이트 이하, 공백만 입력 금지, 수정 항목 1개 이상), 모든 오류를 `{code, message, details}` 형식으로 통일 | [schemas/](app/schemas/), [exceptions.py](app/core/exceptions.py) | [test_auth.py](tests/test_auth.py) |
+| **SQLAlchemy ORM·DB 연동** | User–Post 양방향 1:N, Comment(N:1), PostLike(복합 기본 키로 중복 방지), `ON DELETE CASCADE` / `joinedload`로 N+1 방지, 좋아요·댓글 수는 서브쿼리로 한 번에 조회, 정렬·외래 키 인덱스, `ON CONFLICT DO NOTHING`으로 동시 요청 처리 | [models/](app/models/) | [test_comments_likes.py](tests/test_comments_likes.py) |
+| **사용자 인증·권한 인가** | bcrypt 해싱, 만료 시간(`exp`)이 있는 JWT, 만료·위변조 구분 응답, 작성자 / 관리자 권한 분리(`403`), 로그인 실패 시 메시지와 응답 시간으로 계정 존재 여부를 노출하지 않음, 비밀 값은 `.env`로 분리 | [security.py](app/core/security.py), [deps.py](app/deps.py), [common.py](app/routers/common.py) | [test_auth.py](tests/test_auth.py), [test_posts.py](tests/test_posts.py) |
+| **서비스 구성·운영 환경** | 비동기(asyncpg, aiofiles), 이미지 업로드(파일 시그니처로 형식 판별, 5MB 제한, 실패 시 파일 정리), 목록 TTL 캐시(`X-Cache`), 로깅·처리 시간 미들웨어(`X-Process-Time`), 전역 예외 처리(500에서 내부 정보 숨김), 잘못된 입력은 500 대신 422, Docker Compose로 EC2 배포 | [main.py](app/main.py), [core/](app/core/), [posts.py](app/routers/posts.py) | [test_images.py](tests/test_images.py), [Postman 컬렉션](postman/board-api.postman_collection.json) |
+
+**테스트 결과:** pytest 통합 테스트 47개 통과, 배포 서버 대상 Postman E2E 요청 47개(검증 92개) 통과
+
 ## 기술 스택
 
 | 구분 | 사용 기술 |
