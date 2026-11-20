@@ -206,6 +206,8 @@ Postman 앱에서 `postman/board-api.postman_collection.json`을 Import해 요�
    nano .env    # JWT_SECRET_KEY, POSTGRES_PASSWORD(및 DATABASE_URL의 비밀번호) 변경
    ```
 
+   80 포트를 다른 서비스가 쓰고 있으면 `.env`의 `API_PORT`를 `8080` 등으로 바꾸고, 보안 그룹 인바운드 규칙에 그 포트를 추가합니다.
+
 4. 실행
 
    ```bash
