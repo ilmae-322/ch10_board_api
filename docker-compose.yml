@@ -16,7 +16,8 @@ services:
     restart: unless-stopped  # 서버가 재부팅되어도 자동으로 다시 실행된다.
     env_file: .env
     ports:
-      - "80:8000"            # http://<퍼블릭 IP>/docs 로 접속
+      # 외부 포트는 .env의 API_PORT로 바꿀 수 있다(기본 80). http://<퍼블릭 IP>:<API_PORT>/docs 로 접속
+      - "${API_PORT:-80}:8000"
     volumes:
       - ./uploads:/app/uploads
     depends_on:
