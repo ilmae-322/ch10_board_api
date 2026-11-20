@@ -6,8 +6,11 @@ JWT 인증·인가가 적용된 RESTful 게시판 API입니다. PostgreSQL과 SQ
 
 | 항목 | 주소 |
 |---|---|
-| 서비스 | http://<퍼블릭 IP> |
-| Swagger UI | http://<퍼블릭 IP>/docs |
+| 서비스 | http://54.117.52.82:8080 |
+| Swagger UI | http://54.117.52.82:8080/docs |
+| 상태 확인 | http://54.117.52.82:8080/health |
+
+> 같은 서버의 80 포트는 다른 서비스가 사용하고 있어 8080 포트로 배포했습니다(`.env`의 `API_PORT=8080`).
 
 ### Swagger UI에서 테스트하는 순서
 
@@ -205,6 +208,8 @@ Postman 앱에서 `postman/board-api.postman_collection.json`을 Import해 요�
    cp .env.example .env
    nano .env    # JWT_SECRET_KEY, POSTGRES_PASSWORD(및 DATABASE_URL의 비밀번호) 변경
    ```
+
+   80 포트를 다른 서비스가 쓰고 있으면 `.env`의 `API_PORT`를 `8080` 등으로 바꾸고, 보안 그룹 인바운드 규칙에 그 포트를 추가합니다.
 
 4. 실행
 
