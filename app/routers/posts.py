@@ -1,4 +1,3 @@
-import math
 import uuid
 from pathlib import Path as FilePath
 from typing import Annotated
@@ -6,41 +5,58 @@ from typing import Annotated
 import aiofiles
 import aiofiles.os
 from fastapi import APIRouter, File, Path, Query, Response, UploadFile, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.core.cache import TTLCache
 from app.core.config import get_settings
-from app.core.exceptions import FileTooLarge, InvalidFile, PermissionDenied, PostNotFound
+from app.core.exceptions import FileTooLarge, InvalidFile, PostNotFound
 from app.deps import CurrentUser, DbSession
-from app.models import Post, User
+from app.models import Post, PostLike
+from app.routers.common import (
+    AUTH_ERRORS,
+    MAX_DB_ID,
+    Page,
+    Size,
+    ensure_owner,
+    escape_like,
+    owner_errors,
+    total_pages,
+)
 from app.schemas.common import ErrorResponse
-from app.schemas.post import PostCreate, PostListResponse, PostResponse, PostUpdate
+from app.schemas.post import LikeResponse, PostCreate, PostListResponse, PostResponse, PostUpdate
 
 router = APIRouter(prefix="/posts", tags=["게시글"])
 settings = get_settings()
 
-# 게시글 목록 응답 캐시. 글이 바뀌면(작성/수정/삭제/이미지 변경) 전체를 비운다.
+# 게시글 목록 응답 캐시. 글·댓글·좋아요가 바뀌면 전체를 비운다.
 post_list_cache = TTLCache(settings.cache_ttl_seconds)
 
-PostId = Annotated[int, Path(ge=1, description="게시글 id", examples=[1])]
+PostId = Annotated[int, Path(ge=1, le=MAX_DB_ID, description="게시글 id", examples=[1])]
 
-ALLOWED_IMAGE_TYPES = {
-    "image/jpeg": ".jpg",
-    "image/png": ".png",
-    "image/gif": ".gif",
-    "image/webp": ".webp",
-}
+POST_OWNER_ERRORS = owner_errors("게시글")
+POST_NOT_FOUND = {404: {"model": ErrorResponse, "description": "게시글 없음"}}
 
-AUTH_ERRORS = {
-    401: {"model": ErrorResponse, "description": "인증 실패 (토큰 없음, 만료, 위변조)"},
-}
-OWNER_ERRORS = {
-    **AUTH_ERRORS,
-    403: {"model": ErrorResponse, "description": "권한 없음 (작성자가 아님)"},
-    404: {"model": ErrorResponse, "description": "게시글 없음"},
-}
+# 파일 앞부분의 시그니처(매직 바이트)로 실제 형식을 판별한다.
+# 클라이언트가 보낸 Content-Type은 쉽게 위조할 수 있으므로 믿지 않는다.
+IMAGE_SIGNATURES: list[tuple[bytes, int, str]] = [
+    (b"\xff\xd8\xff", 0, ".jpg"),
+    (b"\x89PNG\r\n\x1a\n", 0, ".png"),
+    (b"GIF87a", 0, ".gif"),
+    (b"GIF89a", 0, ".gif"),
+    (b"WEBP", 8, ".webp"),  # RIFF????WEBP
+]
+
+
+def detect_image_extension(head: bytes) -> str | None:
+    for signature, offset, extension in IMAGE_SIGNATURES:
+        if head[offset : offset + len(signature)] == signature:
+            if extension == ".webp" and not head.startswith(b"RIFF"):
+                continue
+            return extension
+    return None
 
 
 async def get_post_or_404(db: AsyncSession, post_id: int) -> Post:
@@ -53,13 +69,9 @@ async def get_post_or_404(db: AsyncSession, post_id: int) -> Post:
     return post
 
 
-def ensure_author(post: Post, user: User, *, allow_admin: bool = False) -> None:
-    """인가: 작성자 본인인지 확인한다. allow_admin이면 관리자도 허용한다."""
-    if post.author_id == user.id:
-        return
-    if allow_admin and user.is_admin:
-        return
-    raise PermissionDenied("작성자만 수정하거나 삭제할 수 있습니다.")
+async def ensure_post_exists(db: AsyncSession, post_id: int) -> None:
+    if await db.scalar(select(Post.id).where(Post.id == post_id)) is None:
+        raise PostNotFound()
 
 
 @router.get(
@@ -71,8 +83,8 @@ def ensure_author(post: Post, user: User, *, allow_admin: bool = False) -> None:
 async def list_posts(
     response: Response,
     db: DbSession,
-    page: Annotated[int, Query(ge=1, description="페이지 번호 (1부터 시작)")] = 1,
-    size: Annotated[int, Query(ge=1, le=50, description="페이지당 게시글 수")] = 10,
+    page: Page = 1,
+    size: Size = 10,
     keyword: Annotated[
         str | None, Query(max_length=50, description="제목 또는 내용 검색어")
     ] = None,
@@ -81,7 +93,7 @@ async def list_posts(
 
     - 같은 조건의 요청은 짧은 시간 동안 캐시된 결과를 반환한다.
       응답 헤더 `X-Cache`로 `HIT`/`MISS`를 확인할 수 있다.
-    - 작성자 정보는 JOIN으로 함께 조회해 N+1 쿼리를 방지한다.
+    - 작성자 정보는 JOIN으로, 좋아요·댓글 수는 서브쿼리로 함께 조회해 N+1 쿼리를 방지한다.
     """
     keyword = keyword.strip() if keyword else None
     cache_key = f"posts:{page}:{size}:{keyword or ''}"
@@ -93,8 +105,10 @@ async def list_posts(
 
     conditions = []
     if keyword:
-        pattern = f"%{keyword}%"
-        conditions.append(or_(Post.title.ilike(pattern), Post.content.ilike(pattern)))
+        pattern = f"%{escape_like(keyword)}%"
+        conditions.append(
+            or_(Post.title.ilike(pattern, escape="\\"), Post.content.ilike(pattern, escape="\\"))
+        )
 
     total = await db.scalar(select(func.count()).select_from(Post).where(*conditions)) or 0
 
@@ -112,7 +126,7 @@ async def list_posts(
         total=total,
         page=page,
         size=size,
-        total_pages=math.ceil(total / size) if total else 0,
+        total_pages=total_pages(total, size),
     )
     post_list_cache.set(cache_key, payload)
     response.headers["X-Cache"] = "MISS"
@@ -123,7 +137,7 @@ async def list_posts(
     "/{post_id}",
     response_model=PostResponse,
     summary="게시글 단건 조회",
-    responses={404: {"model": ErrorResponse, "description": "게시글 없음"}},
+    responses=POST_NOT_FOUND,
 )
 async def read_post(post_id: PostId, db: DbSession) -> Post:
     """게시글 하나를 반환한다. 누구나 조회할 수 있다."""
@@ -156,7 +170,7 @@ async def create_post(payload: PostCreate, db: DbSession, current_user: CurrentU
     response_model=PostResponse,
     summary="게시글 수정",
     responses={
-        **OWNER_ERRORS,
+        **POST_OWNER_ERRORS,
         422: {"model": ErrorResponse, "description": "입력값 검증 실패"},
     },
 )
@@ -168,7 +182,7 @@ async def update_post(
 ) -> Post:
     """작성자 본인만 수정할 수 있다. 보낸 항목만 변경한다."""
     post = await get_post_or_404(db, post_id)
-    ensure_author(post, current_user)
+    ensure_owner(post.author_id, current_user)
 
     for field, value in payload.model_dump(exclude_unset=True, exclude_none=True).items():
         setattr(post, field, value)
@@ -184,12 +198,12 @@ async def update_post(
     "/{post_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="게시글 삭제",
-    responses=OWNER_ERRORS,
+    responses=POST_OWNER_ERRORS,
 )
 async def delete_post(post_id: PostId, db: DbSession, current_user: CurrentUser) -> None:
-    """작성자 본인 또는 관리자만 삭제할 수 있다."""
+    """작성자 본인 또는 관리자만 삭제할 수 있다. 댓글과 좋아요도 함께 삭제된다."""
     post = await get_post_or_404(db, post_id)
-    ensure_author(post, current_user, allow_admin=True)
+    ensure_owner(post.author_id, current_user, allow_admin=True)
 
     image_url = post.image_url
     await db.delete(post)
@@ -204,8 +218,8 @@ async def delete_post(post_id: PostId, db: DbSession, current_user: CurrentUser)
     response_model=PostResponse,
     summary="게시글 이미지 업로드",
     responses={
-        **OWNER_ERRORS,
-        400: {"model": ErrorResponse, "description": "허용되지 않은 파일 형식"},
+        **POST_OWNER_ERRORS,
+        400: {"model": ErrorResponse, "description": "허용되지 않은 파일 형식, 빈 파일"},
         413: {"model": ErrorResponse, "description": "파일 크기 초과"},
     },
 )
@@ -217,12 +231,17 @@ async def upload_post_image(
 ) -> Post:
     """작성자 본인만 게시글에 이미지를 첨부할 수 있다. 기존 이미지는 교체된다.
 
+    파일 형식은 파일 내용의 시그니처로 판별한다.
     업로드한 파일은 응답의 `image_url` 경로로 내려받을 수 있다.
     """
     post = await get_post_or_404(db, post_id)
-    ensure_author(post, current_user)
+    ensure_owner(post.author_id, current_user)
 
-    extension = ALLOWED_IMAGE_TYPES.get(file.content_type or "")
+    first_chunk = await file.read(1024 * 1024)
+    if not first_chunk:
+        raise InvalidFile("빈 파일은 업로드할 수 없습니다.")
+
+    extension = detect_image_extension(first_chunk)
     if extension is None:
         raise InvalidFile("이미지 파일(JPEG, PNG, GIF, WebP)만 업로드할 수 있습니다.")
 
@@ -234,29 +253,71 @@ async def upload_post_image(
     written = 0
     try:
         async with aiofiles.open(destination, "wb") as out:
-            while chunk := await file.read(1024 * 1024):
+            chunk = first_chunk
+            while chunk:
                 written += len(chunk)
                 if written > settings.max_upload_bytes:
                     raise FileTooLarge(
                         f"파일은 {settings.max_upload_bytes // (1024 * 1024)}MB 이하만 업로드할 수 있습니다."
                     )
                 await out.write(chunk)
-    except FileTooLarge:
+                chunk = await file.read(1024 * 1024)
+
+        old_image_url = post.image_url
+        post.image_url = f"/uploads/{filename}"
+        await db.commit()
+    except Exception:
+        # 크기 초과나 DB 오류가 나면 저장하던 파일을 지워 고아 파일이 남지 않게 한다.
         await _remove_file(destination)
         raise
 
-    if written == 0:
-        await _remove_file(destination)
-        raise InvalidFile("빈 파일은 업로드할 수 없습니다.")
-
-    old_image_url = post.image_url
-    post.image_url = f"/uploads/{filename}"
-    await db.commit()
     await db.refresh(post)
-
     await _remove_image_file(old_image_url)
     post_list_cache.clear()
     return post
+
+
+@router.put(
+    "/{post_id}/like",
+    response_model=LikeResponse,
+    summary="좋아요",
+    responses={**AUTH_ERRORS, **POST_NOT_FOUND},
+)
+async def like_post(post_id: PostId, db: DbSession, current_user: CurrentUser) -> LikeResponse:
+    """게시글에 좋아요를 누른다. 이미 누른 상태에서 다시 요청해도 결과가 같다(멱등)."""
+    await ensure_post_exists(db, post_id)
+    # 동시에 두 번 요청해도 복합 기본 키 충돌 없이 한 번만 저장된다.
+    await db.execute(
+        insert(PostLike)
+        .values(user_id=current_user.id, post_id=post_id)
+        .on_conflict_do_nothing()
+    )
+    await db.commit()
+    return await _like_status(db, post_id, liked=True)
+
+
+@router.delete(
+    "/{post_id}/like",
+    response_model=LikeResponse,
+    summary="좋아요 취소",
+    responses={**AUTH_ERRORS, **POST_NOT_FOUND},
+)
+async def unlike_post(post_id: PostId, db: DbSession, current_user: CurrentUser) -> LikeResponse:
+    """좋아요를 취소한다. 누르지 않은 상태에서 요청해도 오류 없이 같은 결과를 반환한다(멱등)."""
+    await ensure_post_exists(db, post_id)
+    await db.execute(
+        delete(PostLike).where(PostLike.user_id == current_user.id, PostLike.post_id == post_id)
+    )
+    await db.commit()
+    return await _like_status(db, post_id, liked=False)
+
+
+async def _like_status(db: AsyncSession, post_id: int, *, liked: bool) -> LikeResponse:
+    like_count = await db.scalar(
+        select(func.count()).select_from(PostLike).where(PostLike.post_id == post_id)
+    )
+    post_list_cache.clear()
+    return LikeResponse(post_id=post_id, liked=liked, like_count=like_count or 0)
 
 
 async def _remove_file(path: FilePath) -> None:

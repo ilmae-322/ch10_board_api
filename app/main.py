@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
 from app.core.middleware import log_requests
 from app.database import Base, engine
-from app.routers import auth, posts
+from app.routers import auth, comments, posts
 
 settings = get_settings()
 
@@ -38,6 +38,7 @@ JWT 인증·인가가 적용된 RESTful 게시판 API입니다.
 1. **POST /auth/signup** 으로 회원가입
 2. 오른쪽 위 **Authorize** 버튼을 눌러 `username`에 이메일, `password`에 비밀번호 입력
 3. **POST /posts** 로 게시글 작성, **PATCH / DELETE** 로 수정·삭제 (작성자 본인만 가능)
+4. **POST /posts/{post_id}/comments** 로 댓글, **PUT /posts/{post_id}/like** 로 좋아요
 
 ### 공통 오류 형식
 모든 오류는 `{"code": "...", "message": "...", "details": [...]}` 형식으로 응답합니다.
@@ -50,7 +51,8 @@ app = FastAPI(
     lifespan=lifespan,
     openapi_tags=[
         {"name": "인증", "description": "회원가입, 로그인(JWT 발급), 내 정보"},
-        {"name": "게시글", "description": "게시글 CRUD, 이미지 업로드"},
+        {"name": "게시글", "description": "게시글 CRUD, 이미지 업로드, 좋아요"},
+        {"name": "댓글", "description": "댓글 작성·조회·수정·삭제"},
         {"name": "상태", "description": "서버 상태 확인"},
     ],
 )
@@ -69,6 +71,7 @@ register_exception_handlers(app)
 
 app.include_router(auth.router)
 app.include_router(posts.router)
+app.include_router(comments.router)
 
 # 업로드한 이미지를 /uploads/파일명 경로로 제공한다.
 Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)

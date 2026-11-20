@@ -70,7 +70,8 @@ async def login(
     user = await db.scalar(select(User).where(User.email == form.username.lower()))
 
     # 계정 존재 여부를 노출하지 않도록 이메일 오류와 비밀번호 오류를 같은 메시지로 응답한다.
-    if user is None or not verify_password(form.password, user.hashed_password):
+    hashed_password = user.hashed_password if user is not None else None
+    if not verify_password(form.password, hashed_password):
         raise InvalidCredentials(headers={"WWW-Authenticate": "Bearer"})
 
     return Token(

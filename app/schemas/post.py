@@ -67,8 +67,18 @@ class PostResponse(BaseModel):
     content: str
     image_url: str | None
     author: AuthorSummary
+    like_count: int = Field(description="좋아요 수")
+    comment_count: int = Field(description="댓글 수")
     created_at: datetime
     updated_at: datetime
+
+
+class LikeResponse(BaseModel):
+    """좋아요 누르기/취소 결과."""
+
+    post_id: int
+    liked: bool = Field(description="요청 후 현재 사용자가 좋아요한 상태인지")
+    like_count: int
 
 
 class PostListResponse(BaseModel):

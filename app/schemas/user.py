@@ -3,6 +3,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+from app.core.security import BCRYPT_MAX_BYTES
+
 
 class UserCreate(BaseModel):
     """회원가입 요청."""
@@ -18,6 +20,8 @@ class UserCreate(BaseModel):
             raise ValueError("비밀번호는 영문과 숫자를 모두 포함해야 합니다.")
         if " " in value:
             raise ValueError("비밀번호에는 공백을 사용할 수 없습니다.")
+        if len(value.encode("utf-8")) > BCRYPT_MAX_BYTES:
+            raise ValueError(f"비밀번호는 {BCRYPT_MAX_BYTES}바이트 이하여야 합니다. (한글은 글자당 3바이트)")
         return value
 
     @field_validator("nickname")

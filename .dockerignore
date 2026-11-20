@@ -3,3 +3,6 @@
 .git
 __pycache__
 uploads
+tests
+postman
+.pytest_cache

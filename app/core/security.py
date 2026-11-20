@@ -10,14 +10,28 @@ from app.core.exceptions import InvalidToken, TokenExpired
 
 settings = get_settings()
 
+# bcrypt는 72바이트까지만 처리한다(bcrypt 5.0부터는 초과 시 ValueError).
+BCRYPT_MAX_BYTES = 72
+
 
 def hash_password(password: str) -> str:
     """비밀번호를 bcrypt로 해싱한다. 평문은 어디에도 저장하지 않는다."""
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
-def verify_password(password: str, hashed_password: str) -> bool:
-    return bcrypt.checkpw(password.encode("utf-8"), hashed_password.encode("utf-8"))
+# 없는 계정으로 로그인할 때도 같은 시간만큼 해시를 비교하기 위한 값(응답 시간으로 계정 존재 여부 노출 방지)
+DUMMY_PASSWORD_HASH = hash_password("dummy-password-0")
+
+
+def verify_password(password: str, hashed_password: str | None) -> bool:
+    encoded = password.encode("utf-8")
+    if len(encoded) > BCRYPT_MAX_BYTES:
+        # 가입 시 72바이트 초과 비밀번호는 거부하므로 일치할 수 없다.
+        bcrypt.checkpw(b"", DUMMY_PASSWORD_HASH.encode("utf-8"))
+        return False
+    target = hashed_password or DUMMY_PASSWORD_HASH
+    matched = bcrypt.checkpw(encoded, target.encode("utf-8"))
+    return matched and hashed_password is not None
 
 
 def create_access_token(user_id: int, expires_delta: timedelta | None = None) -> str:

@@ -23,5 +23,19 @@ services:
       db:
         condition: service_healthy
 
+  # 테스트 전용 DB: docker compose --profile test up -d test-db
+  # 데이터를 메모리(tmpfs)에만 두며 운영 DB와 분리되어 있다. 로컬(127.0.0.1)에서만 접속할 수 있다.
+  test-db:
+    image: postgres:16
+    profiles: ["test"]
+    environment:
+      POSTGRES_USER: board
+      POSTGRES_PASSWORD: board-password
+      POSTGRES_DB: board_test
+    ports:
+      - "127.0.0.1:5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+
 volumes:
   db-data:

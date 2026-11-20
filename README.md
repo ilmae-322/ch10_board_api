@@ -15,7 +15,8 @@ JWT 인증·인가가 적용된 RESTful 게시판 API입니다. PostgreSQL과 SQ
 2. 오른쪽 위 **Authorize** 버튼 클릭 → `username`에 이메일, `password`에 비밀번호 입력
 3. `POST /posts`로 게시글 작성
 4. `PATCH /posts/{post_id}`, `DELETE /posts/{post_id}`로 수정·삭제 (작성자 본인만 가능)
-5. 다른 계정으로 Authorize한 뒤 위 게시글을 수정하면 `403`이 반환됩니다.
+5. `POST /posts/{post_id}/comments`로 댓글, `PUT /posts/{post_id}/like`로 좋아요
+6. 다른 계정으로 Authorize한 뒤 위 게시글을 수정하면 `403`이 반환됩니다.
 
 ## 기술 스택
 
@@ -29,6 +30,7 @@ JWT 인증·인가가 적용된 RESTful 게시판 API입니다. PostgreSQL과 SQ
 | 문서화 | OpenAPI (Swagger UI) |
 | 배포 | AWS EC2, Docker Compose |
 | 패키지 관리 | uv |
+| 테스트 | pytest (pytest-asyncio, httpx), Postman CLI |
 
 ## 프로젝트 구조
 
@@ -43,9 +45,11 @@ app/
 │   ├── exceptions.py    # 커스텀 예외, 전역 예외 핸들러
 │   ├── middleware.py    # 요청 로깅, 처리 시간 측정
 │   └── cache.py         # 인메모리 TTL 캐시
-├── models/              # SQLAlchemy 모델 (User, Post)
+├── models/              # SQLAlchemy 모델 (User, Post, Comment, PostLike)
 ├── schemas/             # Pydantic 요청·응답 스키마
-└── routers/             # 엔드포인트 (auth, posts)
+└── routers/             # 엔드포인트 (auth, posts, comments) + 공통 매개변수·인가
+tests/                   # pytest 통합 테스트 (테스트 전용 PostgreSQL 사용)
+postman/                 # Postman 컬렉션 (전체 시나리오 E2E 테스트)
 ```
 
 ## API 명세
@@ -61,6 +65,12 @@ app/
 | 게시글 수정 | PATCH | `/posts/{post_id}` | 필요 (작성자) | 200 |
 | 게시글 삭제 | DELETE | `/posts/{post_id}` | 필요 (작성자 또는 관리자) | 204 |
 | 이미지 업로드 | POST | `/posts/{post_id}/image` | 필요 (작성자) | 200 |
+| 좋아요 | PUT | `/posts/{post_id}/like` | 필요 | 200 |
+| 좋아요 취소 | DELETE | `/posts/{post_id}/like` | 필요 | 200 |
+| 댓글 목록 | GET | `/posts/{post_id}/comments?page=1&size=20` | 불필요 | 200 |
+| 댓글 작성 | POST | `/posts/{post_id}/comments` | 필요 | 201 |
+| 댓글 수정 | PATCH | `/comments/{comment_id}` | 필요 (작성자) | 200 |
+| 댓글 삭제 | DELETE | `/comments/{comment_id}` | 필요 (작성자 또는 관리자) | 204 |
 | 상태 확인 | GET | `/health` | 불필요 | 200 |
 
 ### REST 설계 원칙
@@ -68,6 +78,8 @@ app/
 - URL은 자원(명사)만 나타내고 동작은 HTTP 메서드로 표현합니다. (`POST /posts`, `DELETE /posts/1`)
 - 부분 수정은 `PATCH`, 생성은 `201 Created`, 삭제는 본문 없는 `204 No Content`를 사용합니다.
 - 목록은 쿼리 매개변수로 페이지네이션(`page`, `size`)과 검색(`keyword`)을 지원합니다.
+- 좋아요는 `PUT`(누르기)/`DELETE`(취소)로 표현해 같은 요청을 여러 번 보내도 결과가 같습니다(멱등).
+- 댓글은 게시글에 속한 자원이라 목록·작성은 `/posts/{post_id}/comments`, 개별 댓글 수정·삭제는 `/comments/{comment_id}`를 사용합니다.
 
 ### 공통 오류 응답
 
@@ -85,30 +97,36 @@ app/
 
 | 상태 코드 | code | 상황 |
 |---|---|---|
-| 400 | `INVALID_FILE` | 허용되지 않은 파일 형식, 빈 파일 |
+| 400 | `INVALID_FILE` | 이미지가 아닌 파일(내용으로 판별), 빈 파일 |
 | 401 | `NOT_AUTHENTICATED` | 토큰 없음 |
 | 401 | `INVALID_TOKEN` | 위변조되었거나 형식이 잘못된 토큰 |
 | 401 | `TOKEN_EXPIRED` | 만료된 토큰 |
 | 401 | `INVALID_CREDENTIALS` | 이메일 또는 비밀번호 불일치 |
 | 403 | `PERMISSION_DENIED` | 작성자가 아닌 사용자의 수정·삭제 |
 | 404 | `POST_NOT_FOUND` | 존재하지 않는 게시글 |
+| 404 | `COMMENT_NOT_FOUND` | 존재하지 않는 댓글 |
 | 409 | `EMAIL_ALREADY_EXISTS` | 이미 가입된 이메일 |
 | 413 | `FILE_TOO_LARGE` | 5MB 초과 파일 |
-| 422 | `VALIDATION_ERROR` | 입력값 검증 실패 |
+| 422 | `VALIDATION_ERROR` | 입력값 검증 실패 (범위를 벗어난 id·페이지 번호 포함) |
 
 ## 구현 내용
 
 ### 데이터 검증과 직렬화 (Pydantic)
 
 - 요청 스키마(`UserCreate`, `PostCreate`, `PostUpdate`)와 응답 스키마(`UserResponse`, `PostResponse`, `PostListResponse`)를 분리했습니다. 응답에는 비밀번호 해시가 포함되지 않습니다.
-- 커스텀 검증: 비밀번호는 영문과 숫자를 모두 포함, 제목과 내용은 공백만으로 작성 불가, 수정 요청은 항목을 하나 이상 포함해야 합니다.
+- 커스텀 검증: 비밀번호는 영문과 숫자를 모두 포함하고 72바이트 이하(bcrypt 한도), 제목·내용·댓글은 공백만으로 작성 불가, 수정 요청은 항목을 하나 이상 포함해야 합니다.
+- id와 페이지 번호에 상한을 두어 DB 정수 범위를 넘는 값은 `500` 대신 `422`로 응답합니다.
 - 검증 오류는 전역 예외 핸들러에서 공통 오류 형식으로 변환합니다.
 
 ### ORM과 데이터베이스 (SQLAlchemy)
 
 - `User`와 `Post`는 1:N 관계이며 `relationship`을 양방향으로 정의했습니다. 회원이 삭제되면 게시글도 함께 삭제됩니다(`ON DELETE CASCADE`).
+- `Comment`는 게시글·회원과 N:1, `PostLike`는 `(user_id, post_id)` 복합 기본 키로 한 사람이 한 글에 한 번만 좋아요할 수 있습니다. 게시글이 삭제되면 댓글과 좋아요도 DB에서 함께 삭제됩니다.
+- 좋아요는 `INSERT ... ON CONFLICT DO NOTHING`으로 저장해 동시에 두 번 요청해도 오류가 나지 않습니다.
+- 게시글의 좋아요 수와 댓글 수는 `column_property` 상관 서브쿼리로 게시글과 같은 쿼리에서 조회합니다.
 - 목록과 단건 조회에서 `joinedload`로 작성자를 함께 가져와 N+1 쿼리를 방지했습니다.
-- 목록은 `OFFSET`/`LIMIT`으로 페이지네이션하고, 정렬 컬럼(`created_at`)과 외래 키(`author_id`)에 인덱스를 두었습니다.
+- 목록은 `OFFSET`/`LIMIT`으로 페이지네이션하고, 정렬 컬럼(`created_at`)과 외래 키(`author_id`), 댓글의 `(post_id, created_at)`에 인덱스를 두었습니다.
+- 검색어의 `%`, `_`는 이스케이프해 와일드카드가 아닌 글자 그대로 검색합니다.
 
 ### 인증과 인가 (JWT)
 
@@ -117,15 +135,15 @@ app/
 - 비밀번호는 bcrypt로 해싱해 저장합니다.
 - 토큰 만료(`TOKEN_EXPIRED`)와 위변조(`INVALID_TOKEN`)를 구분해 응답합니다.
 - JWT 서명 키와 DB 접속 정보는 환경 변수(`.env`)로 관리하며 저장소에 올리지 않습니다.
-- 로그인 실패 시 이메일 오류와 비밀번호 오류를 같은 메시지로 응답해 계정 존재 여부를 노출하지 않습니다.
+- 로그인 실패 시 이메일 오류와 비밀번호 오류를 같은 메시지로 응답하고, 없는 계정일 때도 해시 비교를 수행해 응답 시간으로도 계정 존재 여부를 노출하지 않습니다.
 
 ### 서비스 구성과 운영
 
 | 기능 | 구현 | 확인 방법 |
 |---|---|---|
 | 비동기 | 모든 엔드포인트와 DB 접근을 `async`로 처리 (AsyncSession, asyncpg, aiofiles) | 전체 API |
-| 업로드 | `POST /posts/{post_id}/image`. 형식(JPEG, PNG, GIF, WebP)과 크기(5MB) 검증, 서버가 생성한 파일명으로 저장 | 업로드 후 응답의 `image_url` 경로로 접속 |
-| 캐싱 | 게시글 목록을 30초 동안 인메모리 캐시, 글 작성·수정·삭제 시 무효화 | 목록을 두 번 조회하면 응답 헤더 `X-Cache`가 `MISS` → `HIT` |
+| 업로드 | `POST /posts/{post_id}/image`. 파일 내용의 시그니처(매직 바이트)로 형식(JPEG, PNG, GIF, WebP)을 판별하고 크기(5MB)를 검증, 서버가 생성한 파일명으로 저장 | 업로드 후 응답의 `image_url` 경로로 접속 |
+| 캐싱 | 게시글 목록을 30초 동안 인메모리 캐시(최대 1000개 키), 글·댓글·좋아요가 바뀌면 무효화 | 목록을 두 번 조회하면 응답 헤더 `X-Cache`가 `MISS` → `HIT` |
 | 미들웨어 | CORS, 요청 로깅과 처리 시간 측정 | 모든 응답의 `X-Process-Time` 헤더, 서버 로그 |
 | 예외 처리 | 커스텀 예외와 전역 핸들러로 오류 형식 통일, 예상하지 못한 오류는 내부 정보를 숨기고 `500` 응답 | 위 오류 응답 표 |
 
@@ -144,6 +162,30 @@ uv run uvicorn app.main:app --reload   # http://localhost:8000/docs
 ```
 
 테이블은 서버 시작 시 자동으로 생성됩니다.
+
+## 테스트
+
+### pytest (통합 테스트 46개)
+
+운영 DB와 분리된 테스트 전용 PostgreSQL(메모리에만 저장)을 띄운 뒤 실행합니다.
+
+```bash
+docker compose --profile test up -d test-db   # localhost:5433
+uv run pytest
+```
+
+인증(토큰 만료·위변조, 72바이트 비밀번호), 게시글 CRUD와 인가, 페이지네이션·검색·캐시, 이미지 업로드(위장 파일, 크기 초과, 파일 정리), 댓글, 좋아요(멱등성)를 검증합니다.
+
+### Postman CLI (E2E 47개 요청)
+
+실행 중인 서버에 회원가입부터 삭제까지 전체 시나리오를 요청합니다. 매번 새 이메일로 가입하므로 반복 실행할 수 있습니다.
+
+```bash
+postman collection run postman/board-api.postman_collection.json                                  # 로컬
+postman collection run postman/board-api.postman_collection.json --env-var baseUrl=http://<퍼블릭 IP>  # EC2
+```
+
+Postman 앱에서 `postman/board-api.postman_collection.json`을 Import해 요청을 하나씩 실행해 볼 수도 있습니다.
 
 ## AWS EC2 배포
 
@@ -172,6 +214,7 @@ uv run uvicorn app.main:app --reload   # http://localhost:8000/docs
    ```
 
 5. 브라우저에서 `http://<퍼블릭 IP>/docs` 접속
+6. (선택) 로컬 PC에서 Postman 컬렉션으로 배포 서버 전체 동작 확인 (위 [테스트](#테스트) 참고)
 
 `restart: unless-stopped` 설정으로 서버가 재부팅되어도 컨테이너가 자동으로 다시 실행됩니다.
 

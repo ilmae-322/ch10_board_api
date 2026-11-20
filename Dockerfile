@@ -1,7 +1,7 @@
 FROM python:3.13-slim
 
-# uv 설치 (공식 이미지에서 실행 파일만 복사)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+# uv 설치 (공식 이미지에서 실행 파일만 복사, 버전을 고정해 빌드 결과를 재현 가능하게 한다)
+COPY --from=ghcr.io/astral-sh/uv:0.12.10 /uv /bin/uv
 
 WORKDIR /app
 

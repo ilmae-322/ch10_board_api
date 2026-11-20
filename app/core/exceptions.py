@@ -63,6 +63,12 @@ class PostNotFound(AppException):
     message = "게시글을 찾을 수 없습니다."
 
 
+class CommentNotFound(AppException):
+    status_code = status.HTTP_404_NOT_FOUND
+    code = "COMMENT_NOT_FOUND"
+    message = "댓글을 찾을 수 없습니다."
+
+
 class EmailAlreadyExists(AppException):
     status_code = status.HTTP_409_CONFLICT
     code = "EMAIL_ALREADY_EXISTS"
