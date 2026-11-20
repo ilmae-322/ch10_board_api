@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import models  # noqa: F401  (테이블 생성을 위해 모델을 등록한다)
@@ -76,6 +77,12 @@ app.include_router(comments.router)
 # 업로드한 이미지를 /uploads/파일명 경로로 제공한다.
 Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
+
+
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    """서비스 주소로 바로 접속하면 API 문서(Swagger UI)로 이동한다."""
+    return RedirectResponse(url="/docs")
 
 
 @app.get("/health", tags=["상태"], summary="서버 상태 확인")

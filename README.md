@@ -168,7 +168,7 @@ uv run uvicorn app.main:app --reload   # http://localhost:8000/docs
 
 ## 테스트
 
-### pytest (통합 테스트 46개)
+### pytest (통합 테스트 47개)
 
 운영 DB와 분리된 테스트 전용 PostgreSQL(메모리에만 저장)을 띄운 뒤 실행합니다.
 
