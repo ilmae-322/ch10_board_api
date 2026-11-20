@@ -6,8 +6,11 @@ JWT 인증·인가가 적용된 RESTful 게시판 API입니다. PostgreSQL과 SQ
 
 | 항목 | 주소 |
 |---|---|
-| 서비스 | http://<퍼블릭 IP> |
-| Swagger UI | http://<퍼블릭 IP>/docs |
+| 서비스 | http://54.117.52.82:8080 |
+| Swagger UI | http://54.117.52.82:8080/docs |
+| 상태 확인 | http://54.117.52.82:8080/health |
+
+> 같은 서버의 80 포트는 다른 서비스가 사용하고 있어 8080 포트로 배포했습니다(`.env`의 `API_PORT=8080`).
 
 ### Swagger UI에서 테스트하는 순서
 
